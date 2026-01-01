@@ -3,7 +3,7 @@ import 'package:http/http.dart' as http;
 
 class ApiService {
   static const String baseUrl =
-      "https://YOUR-BACKEND-URL.up.railway.app";
+      "https://smartqueue-production.up.railway.app";
 
   static Future<Map<String, dynamic>> addCustomer(String name) async {
     final response = await http.post(
