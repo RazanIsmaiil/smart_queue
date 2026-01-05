@@ -1,52 +1,84 @@
-import db from "./_db.js";
+import mysql from "mysql2/promise";
 
 export default async function handler(req, res) {
-  // CORS (اختياري إذا عم تجرب من web)
+
+  // ================= CORS =================
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, msg: "Method not allowed" });
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ message: "Method not allowed" });
+  }
+  // ========================================
 
   try {
-    const { full_name, email, password } = req.body || {};
+    const { username, password } = req.body || {};
 
-    if (!full_name || !email || !password) {
-      return res.status(400).json({ ok: false, msg: "Please fill all fields" });
+    if (!username || !password) {
+      return res.status(400).json({ message: "username and password are required" });
     }
 
-    if (String(password).length < 4) {
-      return res.status(400).json({ ok: false, msg: "Password too short" });
+    const cleanUsername = String(username).trim();
+    const cleanPassword = String(password).trim();
+
+    if (cleanUsername.length < 3) {
+      return res.status(400).json({ message: "Username must be at least 3 characters" });
+    }
+    if (cleanPassword.length < 4) {
+      return res.status(400).json({ message: "Password must be at least 4 characters" });
     }
 
-    // تأكد إن الإيميل مش موجود
-    const [exists] = await db.query("SELECT id FROM users WHERE email = ? LIMIT 1", [email]);
-    if (exists.length > 0) {
-      return res.status(409).json({ ok: false, msg: "Email already exists" });
-    }
+    // ============ DB CONNECTION ============
+    const pool = await mysql.createPool({
+      host: process.env.DB_HOST,
+      port: Number(process.env.DB_PORT),
+      user: process.env.DB_USER,
+      password: process.env.DB_PASS,
+      database: process.env.DB_NAME,
+      waitForConnections: true,
+      connectionLimit: 5,
+      queueLimit: 0,
+      ssl: { rejectUnauthorized: false },
+    });
+    // ======================================
 
-    // role افتراضي user (من DB أصلاً)
-    const [result] = await db.query(
-      "INSERT INTO users (full_name, email, password) VALUES (?, ?, ?)",
-      [full_name, email, password]
+    // username exists?
+    const [exists] = await pool.query(
+      "SELECT id FROM users WHERE username=? LIMIT 1",
+      [cleanUsername]
     );
 
-    const userId = result.insertId;
+    if (exists.length > 0) {
+      return res.status(409).json({ message: "Username already exists" });
+    }
 
-    // رجّع user
-    const [rows] = await db.query(
-      "SELECT id, full_name, email, role FROM users WHERE id = ? LIMIT 1",
-      [userId]
+    // always create normal user
+    const role = "user";
+
+    const [r] = await pool.query(
+      "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+      [cleanUsername, cleanPassword, role]
     );
 
     return res.status(201).json({
-      ok: true,
-      msg: "Account created",
-      user: rows[0],
+      success: true,
+      user: {
+        id: r.insertId,
+        username: cleanUsername,
+        role: role,
+      },
     });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, msg: "Server error" });
+
+  } catch (error) {
+    console.error("SIGNUP ERROR:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: String(error.message || error),
+    });
   }
 }

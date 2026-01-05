@@ -5,7 +5,13 @@ import 'package:http/http.dart' as http;
 
 class HomePage extends StatefulWidget {
   final int userId;
-  const HomePage({super.key, required this.userId});
+  final String username;
+
+  const HomePage({
+    super.key,
+    required this.userId,
+    required this.username,
+  });
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -14,370 +20,395 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   static const String baseUrl = "https://smart-queue-omega.vercel.app";
 
-  bool loading = true;
+  final int queueId = 1; // مؤقتاً ثابت
+  final TextEditingController ticketCtrl = TextEditingController();
+
+  bool tracking = false;
+  bool loading = false;
   String error = "";
 
   int currentTurn = 0;
-  int lastIssued = 0;
-
-  int? myTurn;     // turn_number (إذا عندو تذكرة)
-  int? beforeMe;   // كم واحد قبله
+  int myTicket = 0;
+  int beforeMe = 0;
+  String myStatus = "waiting";
 
   Timer? _timer;
 
   @override
-  void initState() {
-    super.initState();
-    _loadAll();
-    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _loadAll(silent: true));
-  }
-
-  @override
   void dispose() {
     _timer?.cancel();
+    ticketCtrl.dispose();
     super.dispose();
   }
 
-  void _snack(String msg, {bool ok = false}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        backgroundColor: ok ? Colors.green : Colors.red,
-        duration: const Duration(seconds: 2),
-      ),
-    );
+  Color statusColor(String s) {
+    switch (s) {
+      case "waiting":
+        return const Color(0xFF0FA3B1);
+      case "called":
+        return const Color(0xFF1B4965);
+      case "done":
+        return Colors.green;
+      case "skipped":
+        return Colors.orange;
+      default:
+        return Colors.grey;
+    }
   }
 
-  Future<void> _loadAll({bool silent = false}) async {
-    if (!silent) setState(() => loading = true);
+  Future<void> _fetchStatus({bool silent = false}) async {
+    if (!tracking) return;
 
-    try {
-      // 1) queue status
-      final statusRes = await http
-          .get(Uri.parse("$baseUrl/api/queue/status"))
-          .timeout(const Duration(seconds: 10));
-      final statusData = jsonDecode(statusRes.body);
+    final t = int.tryParse(ticketCtrl.text.trim());
+    if (t == null || t <= 0) return;
 
-      if (statusRes.statusCode != 200 || statusData["ok"] != true) {
-        throw Exception(statusData["msg"] ?? "Failed to load queue status");
-      }
-
-      final q = statusData["queue"] ?? {};
-      final int ct = (q["current_turn"] ?? 0) is int
-          ? (q["current_turn"] ?? 0)
-          : int.tryParse((q["current_turn"] ?? "0").toString()) ?? 0;
-
-      final int li = (q["last_issued"] ?? 0) is int
-          ? (q["last_issued"] ?? 0)
-          : int.tryParse((q["last_issued"] ?? "0").toString()) ?? 0;
-
-      // 2) my ticket
-      final meRes = await http
-          .get(Uri.parse("$baseUrl/api/queue/me?userId=${widget.userId}"))
-          .timeout(const Duration(seconds: 10));
-      final meData = jsonDecode(meRes.body);
-
-      if (meRes.statusCode != 200 || meData["ok"] != true) {
-        throw Exception(meData["msg"] ?? "Failed to load my ticket");
-      }
-
-      final ticket = meData["myTicket"]; // ممكن null
-      final int? turn = ticket == null
-          ? null
-          : ((ticket["turn_number"] is int)
-              ? ticket["turn_number"]
-              : int.tryParse((ticket["turn_number"] ?? "").toString()));
-
-      final int? bm = (meData["beforeMe"] is int)
-          ? meData["beforeMe"]
-          : int.tryParse((meData["beforeMe"] ?? "").toString());
-
-      if (!mounted) return;
+    if (!silent) {
       setState(() {
-        currentTurn = ct;
-        lastIssued = li;
-        myTurn = turn;
-        beforeMe = bm;
+        loading = true;
         error = "";
-        loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        error = "Error: $e";
-        loading = false;
       });
     }
+
+    try {
+      final uri = Uri.parse("$baseUrl/api/user_status?queueId=$queueId&ticketNumber=$t");
+      final res = await http.get(uri);
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+
+        setState(() {
+          currentTurn = data["currentTurn"] ?? 0;
+          beforeMe = data["beforeMe"] ?? 0;
+          myTicket = data["myTicket"]?["ticketNumber"] ?? t;
+          myStatus = (data["myTicket"]?["status"] ?? "waiting").toString();
+        });
+      } else {
+        String msg = "Failed";
+        try {
+          final data = jsonDecode(res.body);
+          if (data["message"] != null) msg = data["message"];
+        } catch (_) {}
+        setState(() => error = msg);
+      }
+    } catch (e) {
+      setState(() => error = "Network error: $e");
+    } finally {
+      if (!silent) setState(() => loading = false);
+    }
+  }
+
+  void _startTracking() {
+    final t = int.tryParse(ticketCtrl.text.trim());
+    if (t == null || t <= 0) {
+      setState(() => error = "Please enter a valid ticket number");
+      return;
+    }
+
+    setState(() {
+      tracking = true;
+      error = "";
+    });
+
+    _timer?.cancel();
+    _fetchStatus();
+    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetchStatus(silent: true));
+  }
+
+  void _stopTracking() {
+    _timer?.cancel();
+    setState(() {
+      tracking = false;
+      loading = false;
+      error = "";
+      currentTurn = 0;
+      myTicket = 0;
+      beforeMe = 0;
+      myStatus = "waiting";
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final nextTurn = currentTurn + 1;
-
-    final isNow = myTurn != null && myTurn == currentTurn;
-    final isNext = myTurn != null && myTurn == currentTurn + 1;
+    const bg = Color(0xFFF4F7FA);
 
     return Scaffold(
+      backgroundColor: bg,
       appBar: AppBar(
-        title: const Text("My Queue", style: TextStyle(fontWeight: FontWeight.bold)),
-        backgroundColor: Colors.yellow.shade700,
-        foregroundColor: Colors.black,
+        backgroundColor: const Color(0xFF1B4965),
+        foregroundColor: Colors.white,
+        title: const Text("My Turn"),
         actions: [
           IconButton(
-            tooltip: "Refresh",
-            onPressed: () => _loadAll(),
+            onPressed: tracking ? _fetchStatus : null,
             icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
-            tooltip: "Logout",
-            onPressed: () async {
-              final ok = await showDialog<bool>(
-                context: context,
-                builder: (_) => AlertDialog(
-                  title: const Text("Logout?"),
-                  content: const Text("Are you sure you want to logout?"),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
-                    ElevatedButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-                      child: const Text("Logout"),
-                    ),
-                  ],
-                ),
-              );
-
-              if (ok == true && mounted) {
-                // لازم تكون عامل route اسمه /login
-                Navigator.pushNamedAndRemoveUntil(context, "/login", (_) => false);
-              }
-            },
-            icon: const Icon(Icons.logout),
-          ),
+          )
         ],
       ),
-      body: Container(
-        width: double.infinity,
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.yellow.shade50, Colors.white, Colors.yellow.shade100],
-          ),
-        ),
-        child: loading
-            ? const Center(child: CircularProgressIndicator())
-            : SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    if (error.isNotEmpty) ...[
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.red.shade50,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.red.shade200),
-                        ),
-                        child: Text(error, style: const TextStyle(color: Colors.red)),
-                      ),
-                      const SizedBox(height: 12),
-                    ],
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            _WelcomeCard(username: widget.username),
 
-                    // HERO
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(18),
-                        gradient: LinearGradient(
-                          colors: [Colors.yellow.shade700, Colors.yellow.shade400],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
+            const SizedBox(height: 12),
+
+            // Input + buttons
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [
+                  BoxShadow(
+                    blurRadius: 18,
+                    offset: const Offset(0, 10),
+                    color: Colors.black.withOpacity(0.06),
+                  )
+                ],
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: ticketCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: "Your Ticket Number",
+                        hintText: "ex: 5",
+                        filled: true,
+                        fillColor: const Color(0xFFF5F7FA),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
                         ),
-                        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 12, offset: Offset(0, 8))],
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.25),
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: const Icon(Icons.confirmation_number, size: 30, color: Colors.black),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              "Track your turn in real-time.\nUser ID: ${widget.userId}",
-                              style: const TextStyle(fontWeight: FontWeight.w700, height: 1.25),
-                            ),
-                          ),
-                        ],
                       ),
                     ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: tracking ? _stopTracking : _startTracking,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: tracking
+                            ? Colors.redAccent
+                            : const Color(0xFF0FA3B1),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: Text(
+                        tracking ? "Stop" : "Track",
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
 
-                    const SizedBox(height: 12),
+            if (error.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _ErrorBox(error: error),
+            ],
 
-                    _bigCard(
+            const SizedBox(height: 12),
+
+            if (tracking) ...[
+              if (loading) const LinearProgressIndicator(minHeight: 3),
+
+              const SizedBox(height: 12),
+
+              Row(
+                children: [
+                  Expanded(
+                    child: _InfoCard(
                       title: "Current Turn",
-                      value: "$currentTurn",
-                      icon: Icons.play_circle_fill,
+                      value: currentTurn == 0 ? "-" : "$currentTurn",
+                      icon: Icons.confirmation_number_outlined,
+                      accent: const Color(0xFF0FA3B1),
                     ),
-
-                    const SizedBox(height: 12),
-
-                    _bigCard(
-                      title: "Next Turn",
-                      value: "$nextTurn",
-                      icon: Icons.next_plan,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _InfoCard(
+                      title: "My Ticket",
+                      value: myTicket == 0 ? "-" : "$myTicket",
+                      icon: Icons.person_outline,
+                      accent: const Color(0xFF1B4965),
                     ),
+                  ),
+                ],
+              ),
 
-                    const SizedBox(height: 12),
+              const SizedBox(height: 12),
 
-                    _smallRow(
-                      leftTitle: "Last Issued",
-                      leftValue: "$lastIssued",
-                      rightTitle: "Your Turn",
-                      rightValue: myTurn == null ? "-" : "$myTurn",
+              Row(
+                children: [
+                  Expanded(
+                    child: _InfoCard(
+                      title: "People before me",
+                      value: "$beforeMe",
+                      icon: Icons.groups_2_outlined,
+                      accent: Colors.orange,
                     ),
-
-                    const SizedBox(height: 16),
-
-                    // YOUR TICKET CARD
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(18),
-                        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 6))],
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text("Your Ticket", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 10),
-
-                          if (myTurn == null) ...[
-                            const Text(
-                              "You don't have an active ticket yet.\nAsk the shop owner to add you to the queue.",
-                              style: TextStyle(color: Colors.black54, height: 1.3),
-                            ),
-                            const SizedBox(height: 10),
-                            OutlinedButton.icon(
-                              onPressed: () {
-                                _snack("Waiting for the shop to add you...", ok: true);
-                              },
-                              icon: const Icon(Icons.info_outline),
-                              label: const Text("Info"),
-                            ),
-                          ] else ...[
-                            Text(
-                              "Your number: $myTurn",
-                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              "People before you: ${beforeMe ?? 0}",
-                              style: const TextStyle(color: Colors.black54),
-                            ),
-                            const SizedBox(height: 12),
-
-                            if (isNow)
-                              _notice(
-                                title: "It's your turn الآن ✅",
-                                msg: "Please go to the counter.",
-                                icon: Icons.check_circle,
-                                color: Colors.green,
-                              )
-                            else if (isNext)
-                              _notice(
-                                title: "You are NEXT ⏳",
-                                msg: "Get ready, your turn is coming.",
-                                icon: Icons.schedule,
-                                color: Colors.orange,
-                              )
-                            else
-                              _notice(
-                                title: "Please wait",
-                                msg: "Keep this page open to see live updates.",
-                                icon: Icons.hourglass_bottom,
-                                color: Colors.blueGrey,
-                              ),
-                          ],
-                        ],
-                      ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _InfoCard(
+                      title: "Status",
+                      value: myStatus,
+                      icon: Icons.info_outline,
+                      accent: statusColor(myStatus),
                     ),
-                  ],
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 12),
+
+              // Hint card
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: statusColor(myStatus).withOpacity(0.10),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: statusColor(myStatus).withOpacity(0.25)),
+                ),
+                child: Text(
+                  myStatus == "called"
+                      ? "It's your turn now ✅ Please go to the counter."
+                      : myStatus == "waiting"
+                          ? "Please wait... we update your status automatically."
+                          : "Status: $myStatus",
+                  style: TextStyle(
+                    color: statusColor(myStatus),
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
               ),
+            ] else ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      blurRadius: 18,
+                      offset: const Offset(0, 10),
+                      color: Colors.black.withOpacity(0.06),
+                    )
+                  ],
+                ),
+                child: const Text(
+                  "Enter your ticket number and tap Track.\nYou will see current turn and how many people are before you.",
+                  style: TextStyle(fontWeight: FontWeight.w700, height: 1.4),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
+}
 
-  Widget _notice({
-    required String title,
-    required String msg,
-    required IconData icon,
-    required Color color,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: color.withOpacity(0.25)),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: color),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: TextStyle(fontWeight: FontWeight.bold, color: color)),
-                const SizedBox(height: 2),
-                Text(msg, style: const TextStyle(color: Colors.black87)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+class _WelcomeCard extends StatelessWidget {
+  final String username;
+  const _WelcomeCard({required this.username});
 
-  Widget _bigCard({required String title, required String value, required IconData icon}) {
+  @override
+  Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        gradient: LinearGradient(colors: [Colors.yellow.shade700, Colors.yellow.shade400]),
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 12, offset: Offset(0, 8))],
+        gradient: const LinearGradient(
+          colors: [Color(0xFF0FA3B1), Color(0xFF1B4965)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
       ),
       child: Row(
         children: [
           Container(
-            padding: const EdgeInsets.all(12),
+            height: 44,
+            width: 44,
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.25),
-              borderRadius: BorderRadius.circular(14),
+              color: Colors.white.withOpacity(0.18),
+              borderRadius: BorderRadius.circular(12),
             ),
-            child: Icon(icon, size: 30, color: Colors.black),
+            child: const Icon(Icons.person, color: Colors.white),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              "Hi $username 👋\nTrack your queue turn",
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                height: 1.2,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoCard extends StatelessWidget {
+  final String title;
+  final String value;
+  final IconData icon;
+  final Color accent;
+
+  const _InfoCard({
+    required this.title,
+    required this.value,
+    required this.icon,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            blurRadius: 18,
+            offset: const Offset(0, 10),
+            color: Colors.black.withOpacity(0.06),
+          )
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            height: 44,
+            width: 44,
+            decoration: BoxDecoration(
+              color: accent.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: accent),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: const TextStyle(color: Colors.black87)),
+                Text(title, style: TextStyle(color: Colors.black.withOpacity(0.6))),
                 const SizedBox(height: 6),
-                Text(value, style: const TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
+                Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
               ],
             ),
           ),
@@ -385,36 +416,35 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+}
 
-  Widget _smallRow({
-    required String leftTitle,
-    required String leftValue,
-    required String rightTitle,
-    required String rightValue,
-  }) {
-    return Row(
-      children: [
-        Expanded(child: _miniCard(leftTitle, leftValue)),
-        const SizedBox(width: 12),
-        Expanded(child: _miniCard(rightTitle, rightValue)),
-      ],
-    );
-  }
+class _ErrorBox extends StatelessWidget {
+  final String error;
+  const _ErrorBox({required this.error});
 
-  Widget _miniCard(String title, String value) {
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(14),
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 6))],
+        color: const Color(0xFFFFE8E8),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFFFB3B3)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          Text(title, style: const TextStyle(color: Colors.black54)),
-          const SizedBox(height: 6),
-          Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          const Icon(Icons.error_outline, color: Color(0xFFB00020)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              error,
+              style: const TextStyle(
+                color: Color(0xFFB00020),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
         ],
       ),
     );
